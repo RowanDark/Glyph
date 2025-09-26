@@ -1,6 +1,6 @@
 # Seer
 
-Seer inspects passive telemetry to spot anomalies and suspicious behaviors before they escalate into incidents. The v0.1 release focuses on low-noise secret and PII detection tailored for HTTP response bodies.
+Seer inspects passive telemetry to spot anomalies and suspicious behaviors before they escalate into incidents. The v0.3 release focuses on low-noise secret and PII detection tailored for HTTP response bodies.
 
 ## Capabilities
 - `CAP_HTTP_PASSIVE`
@@ -20,8 +20,9 @@ Evidence for tokens is redacted to only retain the last four characters (e.g. `A
 
 ## Defaults and thresholds
 
-- Generic API keys and Google API keys must exceed an entropy threshold of **3.5 bits per byte**, while JWTs require at least **3.0**. This filters out obvious test values and short placeholders before Seer emits a finding.
-- Evidence is redacted by default to preserve the first **four** and last **four** characters. Override the prefix/suffix via `SEER_EVIDENCE_PREFIX` and `SEER_EVIDENCE_SUFFIX` or the corresponding CLI flags when tighter masking is required.
+- **Entropy floors.** Generic API keys and Google API keys must exceed an entropy threshold of **3.5 bits per byte**, while JWTs require at least **3.0**. The detector records both the observed entropy and the enforced floor in finding metadata so analysts can see why a string qualified.
+- **Evidence redaction.** Evidence is redacted by default to preserve the first **four** and last **four** characters. Override the prefix/suffix via `SEER_EVIDENCE_PREFIX` and `SEER_EVIDENCE_SUFFIX` or the corresponding CLI flags when tighter masking is required. Email addresses retain their domain suffix while the local-part collapses to a prefix plus ellipsis.
+- **Binary avoidance.** The scanner skips binary payloads using content-type hints and printable character ratios before attempting pattern matches, preventing noisy findings from images or archives.
 - Email addresses preserve their domain suffix and only reveal the configured prefix of the local-part. Seer emits an ellipsis (`…`) to denote redacted segments.
 
 These defaults can be tuned per deployment, but the shipped values balance fidelity with safe disclosure for most environments.

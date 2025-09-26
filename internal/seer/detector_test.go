@@ -71,6 +71,16 @@ Email: alerts@example.com`
 	check(4, "seer.slack_token", findings.SeverityHigh, "xoxb…mnop")
 }
 
+func TestEntropyFloorsSuppressLowEntropyTokens(t *testing.T) {
+	content := `Generic: api_key = aaaaaaaaaaaaaaaa
+Google: AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
+
+	results := Scan("https://example.com", content, Config{})
+	if len(results) != 0 {
+		t.Fatalf("expected no findings for low-entropy tokens, got %d", len(results))
+	}
+}
+
 func TestScanDeduplicatesAndRedactsEmails(t *testing.T) {
 	content := `Contact us: security@example.com or SECURITY@example.com`
 	ts := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)

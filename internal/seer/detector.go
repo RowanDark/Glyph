@@ -21,6 +21,10 @@ const (
 	defaultEvidencePrefix = 4
 	defaultEvidenceSuffix = 4
 	defaultMaxScanBytes   = 512 * 1024
+
+	genericKeyMinEntropy = 3.5
+	googleKeyMinEntropy  = 3.5
+	jwtTokenMinEntropy   = 3.0
 )
 
 var (
@@ -127,21 +131,23 @@ func Scan(target, content string, cfg Config) []findings.Finding {
 			continue
 		}
 		entropy := shannonEntropy(candidate)
-		if entropy < 3.5 {
+		if entropy < genericKeyMinEntropy {
 			continue
 		}
 		add(candidate, "seer.generic_api_key", "High-entropy API key candidate detected", findings.SeverityMedium, map[string]string{
-			"entropy": fmt.Sprintf("%.2f", entropy),
+			"entropy":           fmt.Sprintf("%.2f", entropy),
+			"entropy_threshold": fmt.Sprintf("%.2f", genericKeyMinEntropy),
 		})
 	}
 
 	for _, match := range googleAPIKeyRe.FindAllString(content, -1) {
 		entropy := shannonEntropy(match)
-		if entropy < 3.5 {
+		if entropy < googleKeyMinEntropy {
 			continue
 		}
 		add(match, "seer.google_api_key", "Potential Google API key detected", findings.SeverityHigh, map[string]string{
-			"entropy": fmt.Sprintf("%.2f", entropy),
+			"entropy":           fmt.Sprintf("%.2f", entropy),
+			"entropy_threshold": fmt.Sprintf("%.2f", googleKeyMinEntropy),
 		})
 	}
 
@@ -155,11 +161,12 @@ func Scan(target, content string, cfg Config) []findings.Finding {
 			continue
 		}
 		entropy := shannonEntropy(token)
-		if entropy < 3.0 {
+		if entropy < jwtTokenMinEntropy {
 			continue
 		}
 		metadata := map[string]string{
-			"entropy": fmt.Sprintf("%.2f", entropy),
+			"entropy":           fmt.Sprintf("%.2f", entropy),
+			"entropy_threshold": fmt.Sprintf("%.2f", jwtTokenMinEntropy),
 		}
 		if alg != "" {
 			metadata["jwt_alg"] = alg
