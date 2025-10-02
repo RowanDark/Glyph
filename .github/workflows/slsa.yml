@@ -24,7 +24,7 @@ jobs:
       actions: read
       contents: write
       id-token: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generic-post-build-provenance@v1.10.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generic-post-build-provenance@v2.1.0
     env:
       RELEASE_REF: ${{ github.event.workflow_run.head_branch || github.event.workflow_run.head_sha || replace(github.event.workflow_run.display_title, ' ', '-') }}
     with:
@@ -142,7 +142,7 @@ jobs:
       contents: write
       id-token: write
       packages: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/container-post-push-provenance@v1.10.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/container-post-push-provenance@v2.1.0
     env:
       RELEASE_REF: ${{ github.event.workflow_run.head_branch || github.event.workflow_run.head_sha || replace(github.event.workflow_run.display_title, ' ', '-') }}
     with:
