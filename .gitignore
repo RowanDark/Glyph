@@ -8,6 +8,10 @@ glyphd
 # Track the Go command sources even though the glyphd binary is ignored.
 !cmd/
 !cmd/glyphd/
+
+# Frontend test artifacts
+apps/desktop-shell/playwright-report/
+apps/desktop-shell/test-results/
 !cmd/glyphd/**
 !cmd/glyphctl/
 !cmd/glyphctl/**
