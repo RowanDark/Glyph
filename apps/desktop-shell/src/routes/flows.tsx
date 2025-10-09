@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   AlertTriangle,
   Filter,
@@ -8,7 +9,7 @@ import {
   Shield,
   Timer
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { toast } from 'sonner';
 
 import { Button } from '../components/ui/button';
@@ -789,6 +790,7 @@ function NumberFilterGroup({
 
 function FlowsRouteComponent() {
   const [flowMap, setFlowMap] = useState<Map<string, FlowEntry>>(() => new Map());
+  const [, startTransition] = useTransition();
   const flowsList = useMemo(() => {
     return Array.from(flowMap.values()).sort((a, b) => {
       const aTime = new Date(a.updatedAt).getTime();
@@ -814,7 +816,8 @@ function FlowsRouteComponent() {
   const [showDiff, setShowDiff] = useState(true);
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const [viewport, setViewport] = useState({ height: 0, scrollTop: 0 });
+  const eventQueueRef = useRef<FlowEvent[]>([]);
+  const flushTimeoutRef = useRef<number | null>(null);
 
   const applyBatch = useCallback((items: FlowEvent[]) => {
     setFlowMap((previous) => {
@@ -829,6 +832,36 @@ function FlowsRouteComponent() {
     });
   }, []);
 
+  const commitBatch = useCallback(
+    (items: FlowEvent[]) => {
+      if (items.length === 0) {
+        return;
+      }
+      startTransition(() => {
+        applyBatch(items);
+      });
+    },
+    [applyBatch, startTransition]
+  );
+
+  const flushPendingEvents = useCallback(() => {
+    if (eventQueueRef.current.length === 0) {
+      return;
+    }
+    const batch = eventQueueRef.current.splice(0, eventQueueRef.current.length);
+    commitBatch(batch);
+  }, [commitBatch]);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushTimeoutRef.current !== null) {
+      return;
+    }
+    flushTimeoutRef.current = window.setTimeout(() => {
+      flushTimeoutRef.current = null;
+      flushPendingEvents();
+    }, 16);
+  }, [flushPendingEvents]);
+
   useEffect(() => {
     let cancelled = false;
     setInitialLoading(true);
@@ -837,7 +870,7 @@ function FlowsRouteComponent() {
         if (cancelled) {
           return;
         }
-        applyBatch(page.items);
+        commitBatch(page.items);
         setCursor(page.nextCursor ?? null);
         setHasMore(Boolean(page.nextCursor));
       })
@@ -854,7 +887,7 @@ function FlowsRouteComponent() {
     return () => {
       cancelled = true;
     };
-  }, [applyBatch]);
+  }, [commitBatch]);
 
   useEffect(() => {
     let cancelled = false;
@@ -864,7 +897,12 @@ function FlowsRouteComponent() {
       STREAM_ID,
       (event) => {
         if (!cancelled) {
-          applyBatch([event]);
+          eventQueueRef.current.push(event);
+          if (eventQueueRef.current.length >= 250) {
+            flushPendingEvents();
+          } else {
+            scheduleFlush();
+          }
         }
       }
     )
@@ -887,49 +925,13 @@ function FlowsRouteComponent() {
           .close()
           .catch((error) => console.warn('Failed to close flow stream', error));
       }
-    };
-  }, [applyBatch]);
-
-  useEffect(() => {
-    const element = listRef.current;
-    if (!element) {
-      return;
-    }
-    const update = () => {
-      setViewport({ height: element.clientHeight, scrollTop: element.scrollTop });
-    };
-    update();
-    let animationFrame = 0;
-    const onScroll = () => {
-      if (animationFrame) {
-        cancelAnimationFrame(animationFrame);
+      if (flushTimeoutRef.current !== null) {
+        window.clearTimeout(flushTimeoutRef.current);
+        flushTimeoutRef.current = null;
       }
-      animationFrame = requestAnimationFrame(update);
+      eventQueueRef.current = [];
     };
-    element.addEventListener('scroll', onScroll);
-    let resizeObserver: ResizeObserver | null = null;
-    let removeListener: (() => void) | null = null;
-    if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => update());
-      resizeObserver.observe(element);
-    } else {
-      const onResize = () => update();
-      window.addEventListener('resize', onResize);
-      removeListener = () => window.removeEventListener('resize', onResize);
-    }
-    return () => {
-      element.removeEventListener('scroll', onScroll);
-      if (animationFrame) {
-        cancelAnimationFrame(animationFrame);
-      }
-      if (resizeObserver) {
-        resizeObserver.disconnect();
-      }
-      if (removeListener) {
-        removeListener();
-      }
-    };
-  }, []);
+  }, [flushPendingEvents, scheduleFlush]);
 
   const methodOptions = useMemo(() => {
     return Array.from(
@@ -1049,19 +1051,13 @@ function FlowsRouteComponent() {
     return flowsList.find((flow) => flow.id === selectedFlowId) ?? null;
   }, [flowsList, selectedFlowId]);
 
-  const totalHeight = filteredFlows.length * ITEM_HEIGHT;
-  const overscan = 6;
-  const startIndex = Math.max(0, Math.floor(viewport.scrollTop / ITEM_HEIGHT) - overscan);
-  const endIndex = Math.min(
-    filteredFlows.length,
-    Math.ceil((viewport.scrollTop + viewport.height) / ITEM_HEIGHT) + overscan
-  );
-  const visibleFlows = filteredFlows.slice(startIndex, endIndex);
-  const offsetTop = startIndex * ITEM_HEIGHT;
-  const paddingBottom = Math.max(
-    0,
-    totalHeight - offsetTop - visibleFlows.length * ITEM_HEIGHT
-  );
+  const timelineVirtualizer = useVirtualizer({
+    count: filteredFlows.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => ITEM_HEIGHT,
+    overscan: 12
+  });
+  const virtualFlows = timelineVirtualizer.getVirtualItems();
 
   const diffChunks = useMemo(() => {
     if (!editingFlow) {
@@ -1087,7 +1083,7 @@ function FlowsRouteComponent() {
     try {
       setIsLoadingMore(true);
       const page = await listFlows({ cursor, limit: 200 });
-      applyBatch(page.items);
+      commitBatch(page.items);
       setCursor(page.nextCursor ?? null);
       setHasMore(Boolean(page.nextCursor));
     } catch (error) {
@@ -1238,15 +1234,36 @@ function FlowsRouteComponent() {
                 No flows match the current filters.
               </div>
             ) : (
-              <div style={{ paddingTop: offsetTop, paddingBottom }} className="space-y-2">
-                {visibleFlows.map((flow) => (
-                  <FlowListItem
-                    key={flow.id}
-                    flow={flow}
-                    selected={flow.id === selectedFlowId}
-                    onSelect={() => setSelectedFlowId(flow.id)}
-                  />
-                ))}
+              <div
+                style={{ height: `${timelineVirtualizer.getTotalSize()}px`, position: 'relative' }}
+              >
+                {virtualFlows.map((virtualFlow) => {
+                  const flow = filteredFlows[virtualFlow.index];
+                  if (!flow) {
+                    return null;
+                  }
+                  return (
+                    <div
+                      key={virtualFlow.key}
+                      data-index={virtualFlow.index}
+                      ref={timelineVirtualizer.measureElement}
+                      className="pb-2"
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        transform: `translateY(${virtualFlow.start}px)`
+                      }}
+                    >
+                      <FlowListItem
+                        flow={flow}
+                        selected={flow.id === selectedFlowId}
+                        onSelect={() => setSelectedFlowId(flow.id)}
+                      />
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
