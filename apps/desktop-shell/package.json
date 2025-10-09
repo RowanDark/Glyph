@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "format": "prettier --write \"src/**/*.{ts,tsx,css}\""
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
+    "test:a11y": "vite build && playwright test"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -32,6 +33,8 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@playwright/test": "^1.56.0",
     "@tanstack/router-plugin": "^1.132.50",
     "@tauri-apps/cli": "^1.5.9",
     "@types/node": "^20.11.19",

@@ -109,6 +109,40 @@ jobs:
           version: v2.1.6
           args: --out-format=github-actions ./...
 
+  web-accessibility:
+    name: Web accessibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          cache-dependency-path: apps/desktop-shell/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: apps/desktop-shell
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        working-directory: apps/desktop-shell
+        run: pnpm exec playwright install --with-deps
+      - name: Run accessibility checks
+        working-directory: apps/desktop-shell
+        run: pnpm run test:a11y
+      - name: Upload accessibility artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-shell-a11y-${{ github.sha }}
+          path: |
+            apps/desktop-shell/playwright-report
+            apps/desktop-shell/test-results
+          if-no-files-found: warn
+
   perf-bench:
     name: Performance benchmarks
     runs-on: ubuntu-latest
