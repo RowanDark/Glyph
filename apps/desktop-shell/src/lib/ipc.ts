@@ -230,6 +230,49 @@ export async function streamFlowEvents(
   onEvent: (event: FlowEvent) => void,
   options: { filters?: FlowFilters } = {}
 ): Promise<FlowStreamHandle> {
+  const isTauri =
+    typeof window !== 'undefined' &&
+    Boolean((window as typeof window & { __TAURI_IPC__?: unknown }).__TAURI_IPC__);
+
+  if (typeof window !== 'undefined' && !isTauri) {
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL ?? window.location.origin;
+      const url = new URL('/api/flows/stream', base);
+      url.searchParams.set('streamId', streamId);
+      if (options.filters) {
+        url.searchParams.set('filters', encodeURIComponent(JSON.stringify(options.filters)));
+      }
+
+      const eventSource = new EventSource(url.toString(), { withCredentials: true });
+
+      const handleMessage = (event: MessageEvent<string>) => {
+        if (!event.data) {
+          return;
+        }
+        try {
+          const parsed = FlowEventSchema.parse(JSON.parse(event.data));
+          onEvent(parsed);
+        } catch (error) {
+          console.warn('Failed to parse flow event payload from SSE', error);
+        }
+      };
+
+      eventSource.addEventListener('message', handleMessage);
+      eventSource.addEventListener('error', (error) => {
+        console.warn('Flow SSE stream error', error);
+      });
+
+      return {
+        close: async () => {
+          eventSource.removeEventListener('message', handleMessage);
+          eventSource.close();
+        }
+      } satisfies FlowStreamHandle;
+    } catch (error) {
+      console.warn('Falling back to native flow stream', error);
+    }
+  }
+
   const eventName = `flows:${streamId}:events`;
   const unlisten = await listen(eventName, (event: Event<unknown>) => {
     if (!event.payload) {
