@@ -8,6 +8,7 @@ import { Button } from '../components/ui/button';
 import { cn } from '../lib/utils';
 import { ThemeSwitcher } from '../components/theme-switcher';
 import { MetricsPanel } from '../components/metrics-panel';
+import { CrashDiagnostics } from '../components/crash-diagnostics';
 import { openArtifact } from '../lib/ipc';
 import { useArtifact } from '../providers/artifact-provider';
 import { useCommandCenter } from '../providers/command-center';
@@ -336,12 +337,7 @@ function RootComponent() {
 }
 
 function RootErrorBoundary() {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2">
-      <h1 className="text-2xl font-semibold">Something went wrong</h1>
-      <p className="text-muted-foreground">Please restart the application.</p>
-    </div>
-  );
+  return <CrashDiagnostics />;
 }
 
 export const Route = createRootRoute({

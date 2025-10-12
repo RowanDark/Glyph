@@ -1,18 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    backtrace::Backtrace,
     cmp::Ordering,
     collections::{BTreeMap, HashMap},
+    convert::TryFrom,
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     sync::Mutex,
     time::Duration,
 };
 
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine as _};
-use chrono::{DateTime, NaiveDateTime, Utc};
-use flate2::read::GzDecoder;
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use futures::{
     future::{AbortHandle, Abortable},
     StreamExt,
@@ -20,7 +22,8 @@ use futures::{
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, json, Value};
-use tar::Archive;
+use sha2::{Digest, Sha256};
+use tar::{Archive, Builder, Header};
 use tauri::{async_runtime, Manager, State, Window};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -86,6 +89,469 @@ impl GlyphApi {
             path.trim_start_matches('/')
         )
     }
+}
+
+struct CrashReportState {
+    current: Mutex<Option<CrashBundle>>,
+}
+
+impl CrashReportState {
+    fn new() -> Self {
+        Self {
+            current: Mutex::new(None),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CrashBundle {
+    generated_at: DateTime<Utc>,
+    files: Vec<CrashFile>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone)]
+struct CrashFile {
+    name: String,
+    description: String,
+    content: Vec<u8>,
+    redacted: bool,
+    sha256: String,
+}
+
+impl CrashFile {
+    fn new(name: &str, description: &str, content: Vec<u8>, redacted: bool) -> Self {
+        let sha256 = compute_sha256(&content);
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            content,
+            redacted,
+            sha256,
+        }
+    }
+
+    fn size(&self) -> usize {
+        self.content.len()
+    }
+}
+
+impl CrashBundle {
+    fn preview(&self) -> CrashReportPreview {
+        let files = self
+            .files
+            .iter()
+            .map(|file| CrashFilePreview {
+                name: file.name.clone(),
+                description: file.description.clone(),
+                size: file.size(),
+                sha256: file.sha256.clone(),
+                redacted: file.redacted,
+                snippet: snippet_from(&file.content),
+            })
+            .collect();
+        CrashReportPreview {
+            generated_at: self
+                .generated_at
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            files,
+            warnings: self.warnings.clone(),
+        }
+    }
+
+    fn manifest(&self) -> CrashManifest {
+        let files = self
+            .files
+            .iter()
+            .map(|file| CrashManifestFile {
+                name: &file.name,
+                description: &file.description,
+                size: file.size(),
+                sha256: &file.sha256,
+                redacted: file.redacted,
+            })
+            .collect();
+        CrashManifest {
+            generated_at: self
+                .generated_at
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            warnings: &self.warnings,
+            files,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashFilePreview {
+    name: String,
+    description: String,
+    size: usize,
+    sha256: String,
+    redacted: bool,
+    snippet: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashReportPreview {
+    generated_at: String,
+    files: Vec<CrashFilePreview>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashManifest<'a> {
+    generated_at: String,
+    warnings: &'a [String],
+    files: Vec<CrashManifestFile<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashManifestFile<'a> {
+    name: &'a str,
+    description: &'a str,
+    size: usize,
+    sha256: &'a str,
+    redacted: bool,
+}
+
+const MAX_LOG_BYTES: u64 = 512 * 1024;
+const STACK_FILE_NAME: &str = "stackdump.txt";
+const METRICS_FILE_NAME: &str = "metrics.prom";
+const AUDIT_LOG_FILE_NAME: &str = "audit-log.jsonl";
+const SENSITIVE_KEYS: &[&str] = &[
+    "authorization",
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "apikey",
+    "access_token",
+];
+
+fn compute_sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+fn snippet_from(data: &[u8]) -> String {
+    const LIMIT: usize = 2048;
+    if data.is_empty() {
+        return String::new();
+    }
+    let slice = if data.len() > LIMIT {
+        &data[..LIMIT]
+    } else {
+        data
+    };
+    let mut snippet = String::from_utf8_lossy(slice).to_string();
+    if data.len() > LIMIT {
+        snippet.push_str("\n… (truncated)");
+    }
+    snippet
+}
+
+fn sanitize_entry_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "file".to_string();
+    }
+    let mut result = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            result.push(ch);
+        } else {
+            result.push('_');
+        }
+    }
+    if result.is_empty() {
+        "file".to_string()
+    } else {
+        result
+    }
+}
+
+fn should_redact_key(key: &str) -> bool {
+    let mut lowered = key.to_ascii_lowercase();
+    lowered.retain(|ch| ch != '_' && ch != '-' && ch != '.');
+    SENSITIVE_KEYS
+        .iter()
+        .any(|candidate| *candidate == lowered || *candidate == key)
+}
+
+fn redact_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if let Some(entry) = map.get_mut(&key) {
+                    if should_redact_key(&key) {
+                        *entry = Value::String("[REDACTED]".to_string());
+                    } else {
+                        redact_value(entry);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_value(item);
+            }
+        }
+        Value::String(text) => {
+            if text.len() > 128 {
+                *text = "[REDACTED]".to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_audit_log(data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(data.len());
+    for line in data.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            output.push(b'\n');
+            continue;
+        }
+        match serde_json::from_slice::<Value>(line) {
+            Ok(mut value) => {
+                redact_value(&mut value);
+                match serde_json::to_vec(&value) {
+                    Ok(mut encoded) => {
+                        output.append(&mut encoded);
+                        output.push(b'\n');
+                    }
+                    Err(_) => {
+                        output.extend_from_slice(line);
+                        output.push(b'\n');
+                    }
+                }
+            }
+            Err(_) => {
+                output.extend_from_slice(line);
+                output.push(b'\n');
+            }
+        }
+    }
+    output
+}
+
+fn read_recent_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let mut file = fs::File::open(path).map_err(|err| format!("open {path:?}: {err}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|err| format!("stat {path:?}: {err}"))?;
+    let truncated = metadata.len() > limit;
+    let mut buffer = Vec::new();
+    if truncated {
+        let offset = i64::try_from(limit).unwrap_or(i64::MAX);
+        file.seek(SeekFrom::End(-offset))
+            .map_err(|err| format!("seek {path:?}: {err}"))?;
+    }
+    file.read_to_end(&mut buffer)
+        .map_err(|err| format!("read {path:?}: {err}"))?;
+    if truncated {
+        if let Some(first_newline) = buffer.iter().position(|&byte| byte == b'\n') {
+            buffer.drain(..=first_newline);
+        } else {
+            buffer.clear();
+        }
+    }
+    Ok(buffer)
+}
+
+fn bundle_mtime(bundle: &CrashBundle) -> u64 {
+    bundle.generated_at.timestamp().max(0) as u64
+}
+
+fn capture_stack_trace() -> CrashFile {
+    let header = format!(
+        "Glyph desktop shell diagnostic stack\nGenerated at: {}\n\n",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    );
+    let trace = Backtrace::force_capture();
+    let mut payload = header.into_bytes();
+    payload.extend_from_slice(trace.to_string().as_bytes());
+    CrashFile::new(
+        STACK_FILE_NAME,
+        "Stack trace for the desktop shell process",
+        payload,
+        false,
+    )
+}
+
+fn capture_audit_log(path: &Path) -> Result<Option<CrashFile>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let recent = read_recent_file(path, MAX_LOG_BYTES)?;
+    let sanitized = redact_audit_log(&recent);
+    Ok(Some(CrashFile::new(
+        AUDIT_LOG_FILE_NAME,
+        "Recent Glyph audit log entries (redacted)",
+        sanitized,
+        true,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn read_recent_file_discards_partial_first_line_when_truncated() {
+        let mut file = NamedTempFile::new().expect("create temp file");
+        write!(file, "line1\nline2\nline3\n").expect("write log contents");
+
+        let data = read_recent_file(file.path(), 10).expect("read truncated log");
+
+        assert_eq!(String::from_utf8(data).unwrap(), "line3\n");
+    }
+
+    #[test]
+    fn read_recent_file_returns_full_contents_when_not_truncated() {
+        let mut file = NamedTempFile::new().expect("create temp file");
+        write!(file, "line1\nline2\n").expect("write log contents");
+
+        let data = read_recent_file(file.path(), 1024).expect("read full log");
+
+        assert_eq!(String::from_utf8(data).unwrap(), "line1\nline2\n");
+    }
+}
+
+async fn capture_metrics(api: &GlyphApi) -> Result<CrashFile, String> {
+    let url = api.endpoint("metrics");
+    let response = api
+        .client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| format!("request metrics: {err}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(ApiError::UnexpectedResponse { status, body }.to_string());
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("read metrics body: {err}"))?;
+    Ok(CrashFile::new(
+        METRICS_FILE_NAME,
+        "Snapshot of Glyph metrics endpoint",
+        body.into_bytes(),
+        false,
+    ))
+}
+
+#[tauri::command]
+async fn prepare_crash_report(
+    api: State<'_, GlyphApi>,
+    crash: State<'_, CrashReportState>,
+) -> Result<CrashReportPreview, String> {
+    let mut files = Vec::new();
+    let mut warnings = Vec::new();
+
+    files.push(capture_stack_trace());
+
+    match std::env::var("GLYPH_AUDIT_LOG_PATH") {
+        Ok(path) if !path.trim().is_empty() => {
+            let path_buf = PathBuf::from(path.trim());
+            match capture_audit_log(&path_buf) {
+                Ok(Some(file)) => files.push(file),
+                Ok(None) => warnings.push(format!(
+                    "No audit log entries found at {}.",
+                    path_buf.display()
+                )),
+                Err(err) => warnings.push(format!("Failed to read audit log: {err}")),
+            }
+        }
+        _ => warnings.push(
+            "GLYPH_AUDIT_LOG_PATH is not configured; audit log will not be included.".to_string(),
+        ),
+    }
+
+    match capture_metrics(&api).await {
+        Ok(file) => files.push(file),
+        Err(err) => warnings.push(format!("Failed to capture metrics: {err}")),
+    }
+
+    let bundle = CrashBundle {
+        generated_at: Utc::now(),
+        files,
+        warnings,
+    };
+    let preview = bundle.preview();
+
+    {
+        let mut guard = crash.current.lock().map_err(|err| err.to_string())?;
+        *guard = Some(bundle);
+    }
+
+    Ok(preview)
+}
+
+#[tauri::command]
+async fn save_crash_report(path: String, crash: State<'_, CrashReportState>) -> Result<(), String> {
+    let destination = path.trim();
+    if destination.is_empty() {
+        return Err("Destination path is required".to_string());
+    }
+    let bundle = {
+        let guard = crash.current.lock().map_err(|err| err.to_string())?;
+        guard
+            .clone()
+            .ok_or_else(|| "No crash report prepared yet".to_string())?
+    };
+    write_crash_bundle(&bundle, destination)
+}
+
+fn write_crash_bundle(bundle: &CrashBundle, destination: &str) -> Result<(), String> {
+    let file =
+        fs::File::create(destination).map_err(|err| format!("create {destination:?}: {err}"))?;
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    {
+        let mut builder = Builder::new(&mut encoder);
+        let manifest = bundle.manifest();
+        let manifest_data = serde_json::to_vec_pretty(&manifest)
+            .map_err(|err| format!("encode manifest: {err}"))?;
+        let mut header = Header::new_gnu();
+        header.set_size(manifest_data.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(bundle_mtime(bundle));
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "manifest.json", manifest_data.as_slice())
+            .map_err(|err| format!("write manifest: {err}"))?;
+
+        for file in &bundle.files {
+            let entry_name = sanitize_entry_name(&file.name);
+            let path = format!("files/{entry_name}");
+            let mut header = Header::new_gnu();
+            header.set_size(file.size() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(bundle_mtime(bundle));
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, file.content.as_slice())
+                .map_err(|err| format!("write bundle file {}: {err}", file.name))?;
+        }
+
+        builder
+            .finish()
+            .map_err(|err| format!("finalise bundle: {err}"))?;
+    }
+    encoder
+        .finish()
+        .map_err(|err| format!("finalise compression: {err}"))?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -699,11 +1165,7 @@ fn sum_metric(samples: &[MetricSample], name: &str) -> f64 {
         .sum()
 }
 
-fn sum_metric_by_label(
-    samples: &[MetricSample],
-    name: &str,
-    label: &str,
-) -> HashMap<String, f64> {
+fn sum_metric_by_label(samples: &[MetricSample], name: &str, label: &str) -> HashMap<String, f64> {
     let mut totals = HashMap::new();
     for sample in samples.iter().filter(|sample| sample.name == name) {
         if let Some(value) = sample.labels.get(label) {
@@ -1101,20 +1563,20 @@ async fn fetch_metrics(
     };
     let events_total = latency_count;
     let queue_drops = sum_metric(&samples, "glyph_plugin_queue_dropped_total");
-    let latency_buckets = collect_latency_buckets(&samples, "glyph_plugin_event_duration_seconds_bucket");
+    let latency_buckets =
+        collect_latency_buckets(&samples, "glyph_plugin_event_duration_seconds_bucket");
     let mut plugin_errors: Vec<PluginErrorTotal> = sum_metric_by_label_any(
         &samples,
-        &["glyph_plugin_errors_total", "glyph_plugin_event_failures_total"],
+        &[
+            "glyph_plugin_errors_total",
+            "glyph_plugin_event_failures_total",
+        ],
         "plugin",
     )
     .into_iter()
     .map(|(plugin, errors)| PluginErrorTotal { plugin, errors })
     .collect();
-    plugin_errors.sort_by(|a, b| {
-        b.errors
-            .partial_cmp(&a.errors)
-            .unwrap_or(Ordering::Equal)
-    });
+    plugin_errors.sort_by(|a, b| b.errors.partial_cmp(&a.errors).unwrap_or(Ordering::Equal));
 
     let mut cases_found = 0.0;
     for name in [
@@ -1751,6 +2213,7 @@ fn main() {
     tauri::Builder::default()
         .manage(GlyphApi::new())
         .manage(ReplayState::new())
+        .manage(CrashReportState::new())
         .setup(|app| {
             if let Some(window) = app.get_window("main") {
                 configure_devtools(&window);
@@ -1770,6 +2233,8 @@ fn main() {
             stop_flow_stream,
             resend_flow,
             fetch_metrics,
+            prepare_crash_report,
+            save_crash_report,
             fetch_scope_policy,
             validate_scope_policy,
             apply_scope_policy,

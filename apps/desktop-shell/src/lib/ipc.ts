@@ -72,6 +72,21 @@ const DashboardMetricsSchema = z.object({
   pluginErrors: z.array(PluginErrorSchema).optional().default([])
 });
 
+const CrashFilePreviewSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  size: z.number().int(),
+  sha256: z.string(),
+  redacted: z.boolean(),
+  snippet: z.string()
+});
+
+const CrashPreviewSchema = z.object({
+  generatedAt: z.string(),
+  files: z.array(CrashFilePreviewSchema),
+  warnings: z.array(z.string())
+});
+
 const ManifestDnsRecordSchema = z.object({
   host: z.string(),
   addresses: z.array(z.string()).optional().default([])
@@ -368,6 +383,8 @@ export type Manifest = z.infer<typeof ManifestSchema>;
 export type CaseRecord = z.infer<typeof CaseSchema>;
 export type OpenArtifactResponse = z.infer<typeof OpenArtifactResponseSchema>;
 export type ArtifactStatus = z.infer<typeof ArtifactStatusSchema>;
+export type CrashFilePreview = z.infer<typeof CrashFilePreviewSchema>;
+export type CrashPreview = z.infer<typeof CrashPreviewSchema>;
 
 export type FlowFilters = {
   search?: string;
@@ -564,4 +581,13 @@ export async function dryRunScopePolicy(payload: {
 }): Promise<ScopeDryRunResponse> {
   const response = await invoke('dry_run_scope_policy', payload);
   return ScopeDryRunResponseSchema.parse(response);
+}
+
+export async function prepareCrashReport(): Promise<CrashPreview> {
+  const response = await invoke('prepare_crash_report');
+  return CrashPreviewSchema.parse(response);
+}
+
+export async function saveCrashReport(path: string): Promise<void> {
+  await invoke('save_crash_report', { path });
 }

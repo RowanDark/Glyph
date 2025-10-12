@@ -1,6 +1,8 @@
 import { Component, type ReactNode } from 'react';
 import { toast } from 'sonner';
 
+import { CrashDiagnostics } from '../components/crash-diagnostics';
+
 interface Props {
   children: ReactNode;
 }
@@ -24,14 +26,7 @@ export class AppErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
-      return (
-        <div className="flex h-full flex-col items-center justify-center gap-2">
-          <h1 className="text-2xl font-semibold">Something went wrong.</h1>
-          {this.state.error?.message && (
-            <p className="text-muted-foreground">{this.state.error.message}</p>
-          )}
-        </div>
-      );
+      return <CrashDiagnostics errorMessage={this.state.error?.message} />;
     }
 
     return this.props.children;
